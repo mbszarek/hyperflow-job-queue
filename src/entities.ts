@@ -45,8 +45,15 @@ export interface K8sJobMessage {
     name: string,
 }
 
-export interface K8sJobYamlSpec {
-    jobYaml: K8sJobYaml,
+interface K8sJobYamlSpec {
+    jobYaml: K8sJobYaml
+}
+
+export interface K8sMultiJobYamlSpec extends K8sJobYamlSpec {
+    jobMessages: Array<K8sJobMessage>,
+}
+
+export interface K8sSingleJobYamlSpec extends K8sJobYamlSpec {
     jobMessage: K8sJobMessage,
 }
 

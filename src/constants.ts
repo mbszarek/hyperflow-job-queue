@@ -7,7 +7,7 @@ export const logLevel = O.getOrElse(() => 'warn')(parseEnvVariableOpt<string>(pr
 
 export const redisURL = parseEnvVariableOpt<string>(process.env.REDIS_URL)(identity);
 export const hyperflowId = parseEnvVariable<HyperflowId>(process.env.HFID)(str => ({hfId: str}));
-export const algomeratedTasks = parseEnvVariable<Set<string>>(process.env.HJAQ_AGLOMERATED_TASKS)(str => {
+export const aglomeratedTasks = parseEnvVariable<Set<string>>(process.env.HJAQ_AGLOMERATED_TASKS)(str => {
     return new Set(str.split(':'));
 });
 export const pollingInterval = O.getOrElse(() => 1000)(parseEnvVariableOpt<number>(process.env.HJAQ_POLLING_INTERVAL)(parseInt));

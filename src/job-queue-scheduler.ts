@@ -9,7 +9,7 @@ import {groupBy, mergeMap, toArray} from "rxjs/operators";
 import * as k8s from '@kubernetes/client-node';
 import * as fs from 'fs';
 import {identity} from "./utils";
-import { jobQueueName, pollingInterval, redisURL} from "./contants";
+import { jobQueueName, pollingInterval, redisURL} from "./constants";
 
 const rcl = pipe(
     redisURL,
