@@ -9,7 +9,7 @@ import {groupBy, mergeMap, toArray} from "rxjs/operators";
 import * as k8s from '@kubernetes/client-node';
 import * as fs from 'fs';
 import {identity} from "./utils";
-import {defaultContainerName, jobQueueName, pollingInterval, redisURL} from "./contants";
+import { jobQueueName, pollingInterval, redisURL} from "./contants";
 
 const rcl = pipe(
     redisURL,
@@ -28,16 +28,14 @@ const pollQueue = (queueName: string): Observable<string> => {
                 .all(tasks.map(elem => {
                     return new Promise((resolve, _) => {
                         rcl.get(elem, (err, res) => {
-                            if (err) {
-                                subscriber.error(err);
-                            } else {
-                                subscriber.next(res);
-                            }
+                            err ? subscriber.error(err) : subscriber.next(res);
                             resolve();
                         })
                     })
                 }))
-                .then(_ => subscriber.complete());
+                .then(_ => subscriber.complete())
+                .catch(subscriber.error)
+
         })
     })
 };

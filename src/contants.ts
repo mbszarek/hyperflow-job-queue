@@ -3,9 +3,10 @@ import {identity} from "./utils";
 import {HyperflowId} from "./entities";
 import * as O from "fp-ts/lib/Option";
 
+export const logLevel = O.getOrElse(() => 'warn')(parseEnvVariableOpt<string>(process.env.HF_LOG_LEVEL)(identity))
+
 export const redisURL = parseEnvVariableOpt<string>(process.env.REDIS_URL)(identity);
 export const hyperflowId = parseEnvVariable<HyperflowId>(process.env.HFID)(str => ({hfId: str}));
-export const defaultContainerName = parseEnvVariable<string>(process.env.HF_VAR_WORKER_CONTAINER)(identity);
 export const algomeratedTasks = parseEnvVariable<Set<string>>(process.env.HJAQ_AGLOMERATED_TASKS)(str => {
     return new Set(str.split(':'));
 });

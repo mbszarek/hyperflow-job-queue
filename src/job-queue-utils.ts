@@ -8,7 +8,7 @@ export function createQueueKey(hyperflowId: HyperflowId, suffix: string): string
 }
 
 export function createJobDescriptionKey(taskId: string): string {
-    return taskId.concat('_jd');
+    return taskId.concat('-jd');
 }
 
 export function createJobMessageKey(taskId: string): string {
