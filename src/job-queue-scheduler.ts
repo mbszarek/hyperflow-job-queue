@@ -1,15 +1,14 @@
 import * as O from "fp-ts/lib/Option";
-import {parseEnvVariable, parseEnvVariableOpt} from "./job-queue-utils";
-import {HyperflowId, K8sExecutorConfig, RedisNotifyKeyspaceEvents} from "./entities";
+import {HyperflowId} from "./entities";
 import * as redis from 'redis';
 import {pipe} from "fp-ts/lib/pipeable";
-import {createQueueKey} from './job-queue-utils';
-import {Observable, Observer} from "rxjs";
-import {groupBy, mergeMap, toArray} from "rxjs/operators";
+import {EMPTY, Observable, Observer, of} from "rxjs";
+import {bufferTime} from "rxjs/operators";
 import * as k8s from '@kubernetes/client-node';
-import * as fs from 'fs';
-import {identity} from "./utils";
-import { jobQueueName, pollingInterval, redisURL} from "./constants";
+import {maxBatchJobs, pollingInterval, redisURL} from "./constants";
+import {flatMap} from "rxjs/internal/operators";
+import {submitK8sJobs} from "./k8sUtils";
+import {createJobQueueName, createProcessingQueueName} from "./job-queue-utils";
 
 const rcl = pipe(
     redisURL,
@@ -19,83 +18,86 @@ const rcl = pipe(
     )
 )
 
-const redisSub = rcl.duplicate();
-
-const pollQueue = (queueName: string): Observable<string> => {
+const pollQueue = (jobQueue: string, processingQueue: string): Observable<string> => {
     return new Observable<string>(subscriber => {
-        rcl.lrange(queueName, 0, -1, (err, tasks) => {
-            Promise
-                .all(tasks.map(elem => {
-                    return new Promise((resolve, _) => {
-                        rcl.get(elem, (err, res) => {
-                            err ? subscriber.error(err) : subscriber.next(res);
-                            resolve();
-                        })
-                    })
-                }))
-                .then(_ => subscriber.complete())
-                .catch(subscriber.error)
-
-        })
+        const queryRedis = () => {
+            rcl.brpoplpush(jobQueue, processingQueue, pollingInterval, (err, taskId) => {
+                if (err) {
+                    subscriber.error(err);
+                } else {
+                    if (taskId) {
+                        subscriber.next(taskId);
+                        queryRedis();
+                    } else {
+                        subscriber.complete();
+                    }
+                }
+            });
+        }
+        queryRedis();
     })
 };
 
 
-// Redis subscription
-redisSub.config('get', 'notify-keyspace-events', (_, conf) => {
-    const subscribe = () => {
-        redisSub.subscribe(`__keyspace@0__:${jobQueueName}`);
+const subscribeToHflowId = (): void => {
+    console.log("Subscribing to hflow");
+    const redisHflowId = rcl.duplicate();
 
-        redisSub.on('message', _ => {
-            pollingFunction();
-        })
-    }
+    redisHflowId.config('get', 'notify-keyspace-events', (_, conf) => {
+        const subscribe = () => {
+            redisHflowId.psubscribe('__keyspace@0__:hflow:*');
 
-    if (conf[0].indexOf('notify-keyspace-events') !== -1) {
-        subscribe()
-    } else {
-        console.log("notify-keyspace-events not set, configuring...")
-        redisSub.config('set', 'notify-keyspace-events', 'Kx', _ => {
-            subscribe()
-        })
-    }
-});
+            redisHflowId.on('pmessage', (channel, message) => {
+                const regex = /^.*hflow:(.+)$/gm;
+                const match = regex.exec(message);
+                console.log(`New HFID: ${match[1]}`)
+                const hfId: HyperflowId = {
+                    hfId: match[1],
+                };
+                pollingFunction(hfId);
+            });
+        }
 
-let pollingExecuting = false;
-
-const observer: Observer<string[]> = {
-    complete(): void {
-        console.log("SDFFDS");
-        pollingExecuting = false;
-    },
-    error(err: any): void {
-        console.error(err);
-    },
-    next(value: string[]): void {
-        console.log(value);
-    }
-
-
+        if (conf[0].indexOf('notify-keyspace-events') !== -1) {
+            subscribe();
+        } else {
+            console.log("notify-keyspace-events not set, configuring...");
+            redisHflowId.config('set', 'notify-keyspace-events', 'Kx', _ => {
+                subscribe();
+            })
+        }
+    });
 }
+
+subscribeToHflowId();
 
 const kubeConfig = new k8s.KubeConfig();
 kubeConfig.loadFromDefault();
 
-const pollingFunction = () => {
-    if (!pollingExecuting) {
-        pollingExecuting = true;
-        setTimeout(
-            () => {
-                pollQueue(jobQueueName)
-                    .pipe(
-                        groupBy(value => value),
-                        mergeMap(group => group.pipe(toArray())),
-                    )
-                    .subscribe(observer);
-            },
-            pollingInterval,
-        )
+const observer = (hfId: HyperflowId): Observer<string[]> => {
+    return {
+        complete(): void {
+            console.log("Completed");
+        },
+        error(err: any): void {
+            console.error(err);
+        },
+        next(taskIds: string[]): void {
+            submitK8sJobs(hfId, kubeConfig, rcl.duplicate(), taskIds);
+        }
     }
-};
+}
 
+const pollingFunction = (hfId: HyperflowId) => {
+    pollQueue(createJobQueueName(hfId), createProcessingQueueName(hfId)).pipe(
+        bufferTime(pollingInterval * 1000, undefined, maxBatchJobs),
+        flatMap(value => {
+            if (value.length === 0) {
+                return EMPTY;
+            } else {
+                return of(value);
+            }
+        })
+    ).subscribe(observer(hfId));
+}
 

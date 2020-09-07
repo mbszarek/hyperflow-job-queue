@@ -2,12 +2,8 @@ export interface HyperflowId {
     hfId: string;
 }
 
-export interface RedisNotifyKeyspaceEvents {
-    'notify-keyspace-events': string,
-}
-
 export interface K8sExecutorConfig {
-    image: string,
+    image?: string,
     executable: string,
     args?: string[],
     stdout?: string,
@@ -20,8 +16,8 @@ export type K8sJobYaml = string | object;
 
 export interface K8sJobDescription {
     executorConfig: K8sExecutorConfig,
-    inputs: string[],
-    outputs: string[],
+    inputs: object[],
+    outputs: object[],
     redis_url: string,
     taskId: string,
     name: string,

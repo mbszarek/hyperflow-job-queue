@@ -1,18 +1,30 @@
 import * as k8s from "@kubernetes/client-node";
-import {K8sJobDescription, K8sJobMessage, K8sJobYaml, K8sMultiJobYamlSpec, K8sSingleJobYamlSpec} from "./entities";
+import {V1Job} from "@kubernetes/client-node";
+import {
+    HyperflowId,
+    K8sJobDescription,
+    K8sJobMessage,
+    K8sJobYaml,
+    K8sMultiJobYamlSpec,
+    K8sSingleJobYamlSpec
+} from "./entities";
 import * as O from "fp-ts/lib/Option";
 import * as TE from "fp-ts/lib/TaskEither";
 import * as E from "fp-ts/lib/Either";
-import {aglomeratedTasks, hyperflowId, k8sJobTemplatePath, k8sNamespace, k8sVolumePath} from "./constants";
+import {Either} from "fp-ts/lib/Either";
+import {aglomeratedTasks, k8sJobTemplatePath, k8sNamespace, k8sVolumePath} from "./constants";
 import {pipe} from "fp-ts/lib/pipeable";
-import {getJobResult, identity, orElse} from "./utils";
+import {getJobResult} from "./utils";
 import * as yaml from 'js-yaml';
 import * as fs from 'fs';
-import {createJobDescriptionKey, parseEnvVariableOpt} from "./job-queue-utils";
+import {createJobDescriptionKey, createJobMessageKey} from "./job-queue-utils";
+import * as http from "http";
 import {IncomingMessage} from "http";
 import * as redis from "redis";
 import {concat, EMPTY, from, of, partition} from "rxjs";
-import {flatMap, groupBy, toArray} from "rxjs/operators";
+import {groupBy, toArray} from "rxjs/operators";
+import {flatMap} from "rxjs/internal/operators";
+
 
 type DockerImage = string;
 type RedisUrl = string;
@@ -26,19 +38,11 @@ const createJobName = (jobMessage: K8sJobDescription): string => {
 }
 
 const extractCpuRequest = (cpuRequest?: string): string => {
-    return pipe(
-        O.fromNullable(cpuRequest),
-        orElse(() => parseEnvVariableOpt<string>(process.env.HF_VAR_CPU_REQUEST)(identity)),
-        O.getOrElse(() => "0.5"),
-    )
+    return "0.5";
 }
 
 const extractMemRequest = (memRequest?: string): string => {
-    return pipe(
-        O.fromNullable(memRequest),
-        orElse(() => parseEnvVariableOpt<string>(process.env.HF_VAR_MEM_REQUEST)(identity)),
-        O.getOrElse(() => "50Mi"),
-    )
+    return "50Mi";
 }
 
 const interpolate = (yamlTemplate: string, params: Object): string => {
@@ -47,8 +51,7 @@ const interpolate = (yamlTemplate: string, params: Object): string => {
 
 const sendMsgToJob = async (message: K8sJobMessage, redisClient: redis.RedisClient): Promise<number> => {
     return new Promise<number>((resolve, reject) => {
-        const taskMessageKey = `${message.taskId}_msg`
-        redisClient.lpush(taskMessageKey, JSON.stringify(message), (err, reply) => {
+        redisClient.lpush(createJobMessageKey(message.taskId), JSON.stringify(message), (err, reply) => {
             err ? reject(err) : resolve(reply)
         })
     })
@@ -85,8 +88,8 @@ const createK8sJobMessage = (jobDescription: K8sJobDescription): K8sJobMessage =
     return {
         "executable": executable,
         "args": [].concat(args),
-        "inputs": inputs,
-        "outputs": outputs,
+        "inputs": inputs.map(value => JSON.stringify(value)),
+        "outputs": outputs.map(value => JSON.stringify(value)),
         "stdout": stdout,
         "stderr": stderr,
         "stdoutAppend": stdoutAppend,
@@ -98,6 +101,7 @@ const createK8sJobMessage = (jobDescription: K8sJobDescription): K8sJobMessage =
 }
 
 const createK8sSingleJobSpec = async (
+    hfId: HyperflowId,
     redisUrl: string,
     image: DockerImage,
     jobDescription: K8sJobDescription,
@@ -127,7 +131,7 @@ const createK8sSingleJobSpec = async (
         volumePath: k8sVolumePath,
         cpuRequest: extractedCpuRequest,
         memRequest: extractedMemRequest,
-        experimentId: hyperflowId,
+        experimentId: hfId.hfId,
         workflowName: wfname,
         taskName: name,
     };
@@ -145,6 +149,7 @@ const createK8sSingleJobSpec = async (
 
 
 const createK8sMultiJobSpec = async (
+    hfId: HyperflowId,
     redisUrl: string,
     image: DockerImage,
     jobDescriptions: Array<K8sJobDescription>,
@@ -172,7 +177,7 @@ const createK8sMultiJobSpec = async (
         volumePath: k8sVolumePath,
         cpuRequest: extractedCpuRequest,
         memRequest: extractedMemRequest,
-        experimentId: hyperflowId,
+        experimentId: hfId.hfId,
         workflowName: wfname,
         taskName: name,
     };
@@ -209,8 +214,13 @@ const segregateJobs = async (
     ).toPromise();
 }
 
-const createK8sSingleJob = async (k8sApi: k8s.BatchV1Api, jobYaml: K8sJobYaml, taskId: string, attempt: number): Promise<void> => {
-    pipe(
+const createK8sSingleJob = async (
+    k8sApi: k8s.BatchV1Api,
+    jobYaml: K8sJobYaml,
+    taskId: string,
+    attempt: number,
+): Promise<Either<void, { response: http.IncomingMessage; body: V1Job }>> => {
+    return pipe(
         TE.tryCatch(
             () => {
                 // @ts-ignore
@@ -253,15 +263,20 @@ const createK8sSingleJob = async (k8sApi: k8s.BatchV1Api, jobYaml: K8sJobYaml, t
                 )
             }
         ),
-    )
+    )();
 }
 
-const createK8sMultiJob = async (k8sApi: k8s.BatchV1Api, jobYaml: K8sJobYaml, taskIds: string[], attempt: number): Promise<void> => {
-    pipe(
+const createK8sMultiJob = async (
+    k8sApi: k8s.BatchV1Api,
+    jobYaml: K8sJobYaml,
+    taskIds: string[],
+    attempt: number,
+): Promise<Either<void, { response: http.IncomingMessage; body: V1Job }>> => {
+    return pipe(
         TE.tryCatch(
             () => {
                 // @ts-ignore
-                return k8sApi.createNamespacedJob(k8sNamespace, jobYaml)
+                return k8sApi.createNamespacedJob(k8sNamespace, jobYaml);
             },
             err => {
                 E.tryCatch<number, any>(
@@ -300,7 +315,7 @@ const createK8sMultiJob = async (k8sApi: k8s.BatchV1Api, jobYaml: K8sJobYaml, ta
                 )
             }
         ),
-    )
+    )();
 };
 
 const awaitK8sJob = async (taskIds: string[], redisClient: redis.RedisClient): Promise<number> => {
@@ -309,6 +324,7 @@ const awaitK8sJob = async (taskIds: string[], redisClient: redis.RedisClient): P
 };
 
 export const submitK8sJobs = async (
+    hfId: HyperflowId,
     kubeConfig: k8s.KubeConfig,
     redisClient: redis.RedisClient,
     taskIds: string[],
@@ -325,7 +341,7 @@ export const submitK8sJobs = async (
     const firstTask = tasksToAglomerate.pipe(
         flatMap(value => {
             const [[image, redisUrl, taskName], jobDescription] = value;
-            return from(createK8sMultiJobSpec(redisUrl, image, jobDescription, taskName));
+            return from(createK8sMultiJobSpec(hfId, redisUrl, image, jobDescription, taskName));
         }),
         flatMap(value => {
             const {jobYaml, jobMessages} = value;
@@ -338,7 +354,7 @@ export const submitK8sJobs = async (
             const taskStartDate = new Date().toISOString();
             console.log('Starting tasks', taskIds, 'time=' + taskStartDate);
             return from(createK8sMultiJob(k8sApi, jobYaml, taskIds, 0)).pipe(
-                flatMap(value => {
+                flatMap(_ => {
                     return from(jobMessages).pipe(
                         flatMap(jobMessage => sendMsgToJob(jobMessage, redisClient))
                     );
@@ -351,7 +367,7 @@ export const submitK8sJobs = async (
         flatMap(value => {
             const [[image, redisUrl, _], jobDescriptions] = value;
             return from(jobDescriptions).pipe(
-                flatMap(jobDescription => from(createK8sSingleJobSpec(redisUrl, image, jobDescription)))
+                flatMap(jobDescription => from(createK8sSingleJobSpec(hfId, redisUrl, image, jobDescription)))
             )
         }),
         flatMap(value => {
@@ -364,7 +380,7 @@ export const submitK8sJobs = async (
             const taskStartDate = new Date().toISOString();
             console.log('Starting task', jobMessage.taskId, 'time=' + taskStartDate);
             return from(createK8sSingleJob(k8sApi, jobYaml, jobMessage.taskId, 0)).pipe(
-                flatMap(value => sendMsgToJob(jobMessage, redisClient))
+                flatMap(_ => sendMsgToJob(jobMessage, redisClient)),
             );
         })
     );
